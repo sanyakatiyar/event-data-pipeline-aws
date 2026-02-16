@@ -1,0 +1,367 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Capstone Project - Event Analytics Pipeline Starter Template with Extended Infrastructure'
+
+Parameters:
+  StudentId:
+    Type: String
+    Description: Your student ID (for unique bucket naming)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+
+  GlueRoleName:
+    Type: String
+    Default: LabRole
+    Description: Existing IAM role with Glue permissions (LabRole in AWS Academy)
+
+  GlueScriptLocation:
+    Type: String
+    Description: S3 URI of Glue ETL script for the capstone pipeline
+    Default: s3://replace-me-with-your-bucket/scripts/glue_capstone_etl.py
+
+Resources:
+  # Source bucket where Lambda writes raw events
+  SourceEventsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'capstone-events-${StudentId}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldEvents
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
+
+  # Lambda function for event generation
+  EventGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'capstone-event-generator-${StudentId}'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      Timeout: 900
+      MemorySize: 3008
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref SourceEventsBucket
+      Code:
+        ZipFile: |
+          import json
+          import gzip
+          import os
+          from datetime import datetime, timezone
+          import random
+          import boto3
+
+          s3_client = boto3.client('s3')
+
+          # Product catalog
+          CATEGORIES = ["electronics", "clothing", "home", "books", "sports", "toys"]
+          PRODUCTS = {
+              "electronics": ["p_1001", "p_1002", "p_1003", "p_1004", "p_1005"],
+              "clothing": ["p_2001", "p_2002", "p_2003", "p_2004", "p_2005"],
+              "home": ["p_3001", "p_3002", "p_3003", "p_3004", "p_3005"],
+              "books": ["p_4001", "p_4002", "p_4003", "p_4004", "p_4005"],
+              "sports": ["p_5001", "p_5002", "p_5003", "p_5004", "p_5005"],
+              "toys": ["p_6001", "p_6002", "p_6003", "p_6004", "p_6005"],
+          }
+
+          SEARCH_QUERIES = [
+              "wireless headphones", "running shoes", "coffee maker",
+              "python books", "yoga mat", "laptop stand",
+              "winter jacket", "desk lamp",
+          ]
+
+          def get_random_event_count():
+              return random.randint(500_000, 750_000)
+
+          def generate_product_context():
+              category = random.choice(CATEGORIES)
+              product_id = random.choice(PRODUCTS[category])
+              quantity = random.randint(1, 5)
+              price = round(random.uniform(9.99, 299.99), 2)
+              return {
+                  "product_id": product_id,
+                  "category": category,
+                  "quantity": quantity,
+                  "price": price,
+              }
+
+          def generate_event():
+              timestamp = datetime.now(timezone.utc).isoformat()
+              user_id = f"u_{random.randint(10000, 99999)}"
+              session_id = f"s_{random.randint(10000, 99999)}"
+              event_type = random.choices(
+                  ["page_view", "add_to_cart", "remove_from_cart", "purchase", "search"],
+                  weights=[50, 20, 10, 10, 10],
+                  k=1
+              )[0]
+
+              event = {
+                  "timestamp": timestamp,
+                  "user_id": user_id,
+                  "session_id": session_id,
+                  "event_type": event_type,
+                  "product_id": None,
+                  "quantity": None,
+                  "price": None,
+                  "category": None,
+                  "search_query": None,
+              }
+
+              if event_type == "search":
+                  event["search_query"] = random.choice(SEARCH_QUERIES)
+              else:
+                  product_context = generate_product_context()
+                  event["product_id"] = product_context["product_id"]
+                  event["category"] = product_context["category"]
+                  if event_type in ["add_to_cart", "remove_from_cart", "purchase"]:
+                      event["quantity"] = product_context["quantity"]
+                      event["price"] = product_context["price"]
+
+              return event
+
+          def generate_events_jsonl(count):
+              """Generate events as JSONL string without building full list in memory."""
+              lines = []
+              for _ in range(count):
+                  event = generate_event()
+                  lines.append(json.dumps(event))
+              return '\n'.join(lines)
+
+          def lambda_handler(event, context):
+              bucket_name = os.environ['SOURCE_BUCKET']
+              event_count = get_random_event_count()
+              print(f"Generating {event_count:,} events")
+
+              # Generate events directly as JSONL string
+              jsonl_content = generate_events_jsonl(event_count)
+              print(f"Generated {len(jsonl_content):,} bytes of JSON")
+
+              # Compress
+              compressed_content = gzip.compress(jsonl_content.encode('utf-8'))
+              print(f"Compressed to {len(compressed_content):,} bytes")
+
+              now = datetime.now(timezone.utc)
+              timestamp = now.strftime("%Y%m%d-%H%M%S")
+              s3_key = (
+                  f"events/year={now.year:04d}/month={now.month:02d}/"
+                  f"day={now.day:02d}/hour={now.hour:02d}/minute={now.minute:02d}/"
+                  f"events-{timestamp}.jsonl.gz"
+              )
+
+              s3_client.put_object(
+                  Bucket=bucket_name,
+                  Key=s3_key,
+                  Body=compressed_content,
+                  ContentType='application/gzip',
+                  ContentEncoding='gzip'
+              )
+
+              print(f"Uploaded {event_count:,} events to s3://{bucket_name}/{s3_key}")
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "event_count": event_count,
+                      "s3_key": s3_key,
+                      "bucket": bucket_name
+                  })
+              }
+
+  # EventBridge rule to trigger Lambda every 5 minutes
+  EventGeneratorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'capstone-event-generator-schedule-${StudentId}'
+      Description: Trigger event generator every 5 minutes
+      ScheduleExpression: 'rate(5 minutes)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EventGeneratorFunction.Arn
+          Id: EventGeneratorTarget
+
+  # Allow EventBridge to invoke Lambda
+  EventGeneratorFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EventGeneratorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventGeneratorSchedule.Arn
+
+  # Lambda function to empty bucket on stack deletion
+  BucketCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'capstone-bucket-cleanup-${StudentId}'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      bucket_name = event['ResourceProperties']['BucketName']
+                      print(f"Emptying bucket: {bucket_name}")
+                      s3 = boto3.resource('s3')
+                      bucket = s3.Bucket(bucket_name)
+                      # Delete all objects including versions
+                      bucket.object_versions.all().delete()
+                      print(f"Bucket {bucket_name} emptied successfully")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  # Custom resource to trigger bucket cleanup on stack deletion
+  BucketCleanup:
+    Type: Custom::BucketCleanup
+    Properties:
+      ServiceToken: !GetAtt BucketCleanupFunction.Arn
+      BucketName: !Ref SourceEventsBucket
+
+  # Analytics bucket for processed data and Athena results
+  AnalyticsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'capstone-analytics-${StudentId}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Glue Database for analytical tables
+  AnalyticsGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub 'capstone_${StudentId}_db'
+        Description: Glue database for capstone analytical tables
+
+  # Athena WorkGroup for analytical queries
+  AnalyticsAthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub 'capstone-${StudentId}-wg'
+      Description: Athena workgroup for capstone queries
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: false
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AnalyticsBucket}/athena_results/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+
+  # Glue Job for ETL from raw JSON to partitioned Parquet
+  CapstoneGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'capstone-etl-${StudentId}'
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${GlueRoleName}'
+      Command:
+        Name: glueetl
+        ScriptLocation: !Ref GlueScriptLocation
+        PythonVersion: "3"
+      GlueVersion: "4.0"
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      DefaultArguments:
+        "--job-language": "python"
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--enable-metrics": "true"
+        "--enable-job-insights": "true"
+        "--INPUT_PATH": !Sub "s3://${SourceEventsBucket}/events/"
+        "--OUTPUT_PATH": !Sub "s3://${AnalyticsBucket}/analytics/events_parquet/"
+        "--STUDENT_ID": !Ref StudentId
+      MaxRetries: 1
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      Description: Glue job that converts raw JSON events to partitioned Parquet with incremental bookmarks and sets up Athena catalog objects
+
+Outputs:
+  SourceBucketName:
+    Description: S3 bucket containing raw event data
+    Value: !Ref SourceEventsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceBucket'
+
+  SourceDataPrefix:
+    Description: S3 prefix where events are written
+    Value: 'events/'
+    Export:
+      Name: !Sub '${AWS::StackName}-SourcePrefix'
+
+  SourceBucketArn:
+    Description: ARN of source bucket
+    Value: !GetAtt SourceEventsBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceBucketArn'
+
+  EventGeneratorScheduleName:
+    Description: EventBridge rule triggering event generation
+    Value: !Ref EventGeneratorSchedule
+    Export:
+      Name: !Sub '${AWS::StackName}-Schedule'
+
+  LambdaFunctionName:
+    Description: Name of event generator Lambda function
+    Value: !Ref EventGeneratorFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunction'
+
+  AnalyticsBucketName:
+    Description: S3 bucket for analytical Parquet events and Athena results
+    Value: !Ref AnalyticsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AnalyticsBucket'
+
+  AnalyticsDataPrefix:
+    Description: S3 prefix for analytical Parquet events
+    Value: 'analytics/events_parquet/'
+    Export:
+      Name: !Sub '${AWS::StackName}-AnalyticsDataPrefix'
+
+  AnalyticsGlueDatabaseName:
+    Description: Glue database for capstone analytics
+    Value: !Ref AnalyticsGlueDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-AnalyticsGlueDatabase'
+
+  AnalyticsAthenaWorkGroupName:
+    Description: Athena workgroup for capstone queries
+    Value: !Ref AnalyticsAthenaWorkGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AnalyticsAthenaWorkGroup'
+
+  CapstoneGlueJobName:
+    Description: Name of the Glue ETL job for the capstone
+    Value: !Ref CapstoneGlueJob
+    Export:
+      Name: !Sub '${AWS::StackName}-CapstoneGlueJobName'
