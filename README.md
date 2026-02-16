@@ -58,24 +58,24 @@ Athena (Gold)
 ## Repository Structure
 
 ```
-event-data-pipeline-aws/
-├── README.md
-├── LICENSE
-├── architecture/
-│   └── architecture_diagram.png
-├── infrastructure/
-│   └── capstone-starter-extended.cfn.yaml
-├── etl/
-│   └── glue_capstone_etl.py
-├── queries/
-│   └── queries.sql
-├── data-generator/
-│   ├── event_generator.py
-│   └── generate_sample_data.py
-├── sample-data/
-│   └── sample_events.jsonl.gz
-└── docs/
-    └── blog_post.pdf
+    event-data-pipeline-aws/
+    ├── README.md
+    ├── LICENSE
+    ├── architecture/
+    │   └── architecture_diagram.png
+    ├── infrastructure/
+    │   └── capstone-starter-extended.cfn.yaml
+    ├── etl/
+    │   └── glue_capstone_etl.py
+    ├── queries/
+    │   └── queries.sql
+    ├── data-generator/
+    │   ├── event_generator.py
+    │   └── generate_sample_data.py
+    ├── sample-data/
+    │   └── sample_events.jsonl.gz
+    └── docs/
+        └── blog_post.pdf
 ```
 
 ------------------------------------------------------------------------
